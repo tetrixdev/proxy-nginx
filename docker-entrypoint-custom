@@ -1,0 +1,8 @@
+#!/bin/bash
+set -e
+
+# Start cron daemon for certbot renewal
+crond -b -l 8
+
+# Execute the original nginx entrypoint
+exec /docker-entrypoint.sh "$@"

@@ -1,0 +1,6 @@
+# Let's Encrypt certificates (generated per-deployment)
+letsencrypt/
+
+# Local development
+.DS_Store
+*.log

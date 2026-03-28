@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Maintenance - We'll be back shortly</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #e5e7eb;
+        }
+
+        .container {
+            text-align: center;
+            padding: 2rem;
+            max-width: 500px;
+        }
+
+        .logo {
+            width: 80px;
+            height: 80px;
+            margin-bottom: 2rem;
+            opacity: 0.9;
+        }
+
+        .icon {
+            font-size: 4rem;
+            margin-bottom: 1.5rem;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 0.6; }
+            50% { opacity: 1; }
+        }
+
+        h1 {
+            font-size: 1.75rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            color: #f9fafb;
+        }
+
+        p {
+            font-size: 1.1rem;
+            color: #9ca3af;
+            line-height: 1.6;
+            margin-bottom: 2rem;
+        }
+
+        .status {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            background: rgba(255, 255, 255, 0.1);
+            padding: 0.75rem 1.5rem;
+            border-radius: 9999px;
+            font-size: 0.9rem;
+            color: #d1d5db;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            background: #fbbf24;
+            border-radius: 50%;
+            animation: blink 1.5s infinite;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        .footer {
+            margin-top: 3rem;
+            font-size: 0.85rem;
+            color: #6b7280;
+        }
+
+        .footer a {
+            color: #60a5fa;
+            text-decoration: none;
+        }
+
+        .footer a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="icon">&#128736;</div>
+        <h1>We'll be back shortly</h1>
+        <p>
+            We're performing scheduled maintenance to improve your experience.
+            This won't take long.
+        </p>
+        <div class="status">
+            <span class="status-dot"></span>
+            Maintenance in progress
+        </div>
+        <div class="footer">
+            Powered by <a href="https://github.com/tetrixdev/proxy-nginx" target="_blank">PocketDev</a>
+        </div>
+    </div>
+</body>
+</html>
