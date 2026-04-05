@@ -18,6 +18,10 @@ RUN mkdir -p /etc/nginx/ssl && \
 # Copy maintenance page files
 COPY html /var/www/html
 
+# Copy domain management scripts
+COPY scripts /scripts
+RUN chmod +x /scripts/*.sh
+
 # Copy custom entrypoint
 COPY docker-entrypoint-custom /usr/local/bin/docker-entrypoint-custom
 RUN chmod +x /usr/local/bin/docker-entrypoint-custom

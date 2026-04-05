@@ -14,6 +14,8 @@ This is `tetrixdev/proxy-nginx`, a Docker-based nginx reverse proxy for producti
 | `compose/default.conf` | Nginx config template |
 | `html/maintenance.html` | Fallback page for 502/503 |
 | `install.sh` | One-line installer script |
+| `scripts/domain.sh` | Domain upsert/delete management |
+| `scripts/htpasswd.sh` | Basic auth user management |
 
 ## Critical Configuration
 
@@ -44,11 +46,91 @@ proxy_read_timeout 600s;
 proxy_send_timeout 600s;
 ```
 
-## Adding a New Domain
+## Domain Management Scripts
 
-1. Add server block to `default.conf`
-2. Reload nginx: `docker exec proxy-nginx nginx -s reload`
-3. Request SSL: `docker exec -it proxy-nginx certbot --nginx -d domain.com`
+### Add/Update a Domain (upsert)
+
+```bash
+# Proxy domain
+docker exec proxy-nginx /scripts/domain.sh upsert \
+  --domain=app.example.com \
+  --upstream=myapp-nginx
+
+# Redirect domain
+docker exec proxy-nginx /scripts/domain.sh upsert \
+  --domain=example.com \
+  --redirect=https://www.example.com
+
+# With IP whitelist (Tailscale subnet + specific IP)
+docker exec proxy-nginx /scripts/domain.sh upsert \
+  --domain=staging.example.com \
+  --upstream=staging-nginx \
+  --whitelist="100.64.0.0/10,203.0.113.50"
+
+# With basic auth
+docker exec proxy-nginx /scripts/domain.sh upsert \
+  --domain=admin.example.com \
+  --upstream=admin-nginx \
+  --basic-auth='admin:$apr1$xyz...'
+```
+
+### Delete a Domain
+
+```bash
+docker exec proxy-nginx /scripts/domain.sh delete --domain=old.example.com
+```
+
+### List Managed Domains
+
+```bash
+docker exec proxy-nginx /scripts/domain.sh list
+```
+
+### Script Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--domain` | required | Domain name |
+| `--upstream` | - | Container to proxy to |
+| `--redirect` | - | Redirect target URL |
+| `--whitelist` | - | IP/CIDR allowlist (comma-separated) |
+| `--basic-auth` | - | htpasswd format `user:hash` |
+| `--max-body-size` | `256M` | Upload size limit |
+| `--websocket-timeout` | `600s` | SSE/WebSocket timeout |
+| `--comment` | - | Label in config |
+| `--no-reload` | - | Skip nginx reload |
+
+### Basic Auth Helper
+
+```bash
+# Add user (creates htpasswd file if needed)
+docker exec proxy-nginx /scripts/htpasswd.sh add --user=admin --password=secret
+
+# Generate hash only (for --basic-auth flag)
+docker exec proxy-nginx /scripts/htpasswd.sh hash --password=secret
+
+# Remove user
+docker exec proxy-nginx /scripts/htpasswd.sh remove --user=admin
+
+# List users
+docker exec proxy-nginx /scripts/htpasswd.sh list
+```
+
+### Block Markers
+
+The script uses markers to manage config blocks:
+
+```nginx
+# BEGIN app.example.com
+# Managed by proxy-nginx
+server {
+    server_name app.example.com;
+    ...
+}
+# END app.example.com
+```
+
+This allows upsert (update if exists, create if not) and clean deletion.
 
 ## Common Tasks
 

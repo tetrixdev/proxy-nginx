@@ -46,54 +46,92 @@ sed -i "s/REPLACE_WITH_VERSION/$VERSION/g" compose.yml
 docker compose up -d
 ```
 
-## Adding Domains
+## Domain Management
 
-Edit `default.conf` to add your domains:
+Use the built-in domain script to manage nginx configurations:
 
-```nginx
-server {
-    server_name www.example.com;
+### Add a Proxy Domain
 
-    client_max_body_size 256M;
-    root /var/www/html;
-
-    # SSE Streaming Optimization
-    ssl_buffer_size 1400;
-
-    location / {
-        set $upstream http://example-app-nginx;
-        resolver 127.0.0.11 valid=30s;
-
-        proxy_pass $upstream;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_set_header Host $host;
-        proxy_redirect off;
-
-        # WebSocket/SSE support
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection $connection_upgrade;
-
-        # Long-running connection timeouts (10 min)
-        proxy_read_timeout 600s;
-        proxy_send_timeout 600s;
-
-        # Maintenance page fallback
-        proxy_intercept_errors on;
-        error_page 502 503 /maintenance.html;
-    }
-
-    location = /maintenance.html {
-        internal;
-        root /var/www/html;
-    }
-
-    listen 80;
-}
+```bash
+docker exec proxy-nginx /scripts/domain.sh upsert \
+  --domain=app.example.com \
+  --upstream=myapp-nginx
 ```
 
-Reload nginx after changes:
+### Add a Redirect Domain
+
+```bash
+docker exec proxy-nginx /scripts/domain.sh upsert \
+  --domain=example.com \
+  --redirect=https://www.example.com
+```
+
+### Advanced Options
+
+```bash
+# Domain with IP whitelist (Tailscale + specific IP)
+docker exec proxy-nginx /scripts/domain.sh upsert \
+  --domain=staging.example.com \
+  --upstream=staging-nginx \
+  --whitelist="100.64.0.0/10,203.0.113.50"
+
+# Domain with basic auth
+docker exec proxy-nginx /scripts/htpasswd.sh add --user=admin --password=secret
+docker exec proxy-nginx /scripts/domain.sh upsert \
+  --domain=admin.example.com \
+  --upstream=admin-nginx \
+  --basic-auth='admin:$apr1$...'
+
+# Custom body size and timeout
+docker exec proxy-nginx /scripts/domain.sh upsert \
+  --domain=upload.example.com \
+  --upstream=upload-nginx \
+  --max-body-size=1G \
+  --websocket-timeout=3600s
+```
+
+### Remove a Domain
+
+```bash
+docker exec proxy-nginx /scripts/domain.sh delete --domain=old.example.com
+```
+
+### List Managed Domains
+
+```bash
+docker exec proxy-nginx /scripts/domain.sh list
+```
+
+### Script Reference
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--domain` | Domain name (required) | - |
+| `--upstream` | Upstream container name | - |
+| `--redirect` | Redirect target URL | - |
+| `--whitelist` | Comma-separated IP/CIDR allowlist | - |
+| `--basic-auth` | Basic auth `user:hash` | - |
+| `--max-body-size` | Max upload size | `256M` |
+| `--websocket-timeout` | WebSocket/SSE timeout | `600s` |
+| `--comment` | Label for config block | - |
+| `--no-reload` | Skip nginx reload | - |
+
+### Manual Configuration
+
+For complex configurations, edit `default.conf` directly. Use `# BEGIN domain` and `# END domain` markers if you want the script to manage the block later:
+
+```nginx
+# BEGIN www.example.com
+# My custom config
+server {
+    server_name www.example.com;
+    # ... custom configuration ...
+    listen 80;
+}
+# END www.example.com
+```
+
+Reload nginx after manual changes:
 
 ```bash
 docker exec proxy-nginx nginx -s reload
