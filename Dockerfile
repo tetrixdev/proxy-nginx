@@ -6,7 +6,15 @@ RUN apk add --no-cache \
     certbot-nginx \
     openssl \
     dcron \
-    bash
+    bash \
+    py3-pip
+
+# Install certbot-dns-transip plugin for automatic DNS-01 challenges
+# This enables wildcard SSL certificates with TransIP DNS
+RUN pip3 install --no-cache-dir --break-system-packages certbot-dns-transip
+
+# Create directory for TransIP credentials
+RUN mkdir -p /etc/letsencrypt/transip
 
 # Create SSL directory and generate self-signed certificate for default server block
 RUN mkdir -p /etc/nginx/ssl && \
