@@ -55,7 +55,6 @@ Upsert Options:
   --basic-auth=USER:HASH    Basic auth credentials (htpasswd format)
   --max-body-size=SIZE      Max upload size (default: 256M)
   --websocket-timeout=TIME  WebSocket/SSE timeout (default: 600s)
-  --ssl-only                Force HTTPS redirect (flag)
   --no-reload               Don't reload nginx after changes
 
 Delete Options:
@@ -83,11 +82,16 @@ EOF
     exit 1
 }
 
+# Normalize domain (lowercase)
+normalize_domain() {
+    echo "$1" | tr '[:upper:]' '[:lower:]'
+}
+
 # Validate domain format
 validate_domain() {
     domain="$1"
-    # Allow: example.com, sub.example.com, *.example.com
-    if ! echo "$domain" | grep -qE '^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$'; then
+    # Allow: example.com, sub.example.com, *.example.com, example.com:8080
+    if ! echo "$domain" | grep -qE '^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[0-9]+)?$'; then
         log_error "Invalid domain format: $domain"
         exit 1
     fi
@@ -198,21 +202,6 @@ server {
 NGINX
 }
 
-# Generate SSL-only redirect block (used when --ssl-only is set)
-generate_ssl_redirect_block() {
-    cat << NGINX
-# BEGIN ${DOMAIN}_http_redirect
-# HTTP to HTTPS redirect for $DOMAIN
-# Generated: $(date -Iseconds)
-server {
-    server_name $DOMAIN;
-    listen 80;
-    return 301 https://\$host\$request_uri;
-}
-# END ${DOMAIN}_http_redirect
-NGINX
-}
-
 # Reload nginx
 reload_nginx() {
     if [ "$NO_RELOAD" = "true" ]; then
@@ -265,6 +254,9 @@ cmd_upsert() {
         log_error "--domain is required"
         exit 1
     fi
+
+    # Normalize to lowercase
+    DOMAIN=$(normalize_domain "$DOMAIN")
 
     validate_domain "$DOMAIN"
 
@@ -322,6 +314,9 @@ cmd_delete() {
         exit 1
     fi
 
+    # Normalize to lowercase
+    DOMAIN=$(normalize_domain "$DOMAIN")
+
     validate_domain "$DOMAIN"
 
     if ! domain_exists "$DOMAIN"; then
@@ -364,7 +359,6 @@ WHITELIST=""
 BASIC_AUTH=""
 MAX_BODY_SIZE=""
 WEBSOCKET_TIMEOUT=""
-SSL_ONLY="false"
 NO_RELOAD="false"
 
 # First argument is the command
@@ -401,9 +395,6 @@ while [ $# -gt 0 ]; do
             ;;
         --websocket-timeout=*)
             WEBSOCKET_TIMEOUT="${1#*=}"
-            ;;
-        --ssl-only)
-            SSL_ONLY="true"
             ;;
         --no-reload)
             NO_RELOAD="true"
