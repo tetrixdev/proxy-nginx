@@ -136,6 +136,12 @@ NGINX
             [ -n "$cidr" ] && echo "    allow $cidr;"
         done
         echo "    deny all;"
+        echo ""
+        echo "    # Allow ACME challenge for SSL certificates (bypasses IP whitelist)"
+        echo "    location ^~ /.well-known/acme-challenge/ {"
+        echo "        allow all;"
+        echo "        root /var/www/html;"
+        echo "    }"
     fi
 
     # Basic auth

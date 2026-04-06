@@ -151,6 +151,20 @@ docker exec -it proxy-nginx certbot --nginx -d www.example.com -d example.com
 
 Certificates auto-renew via cron (runs twice daily).
 
+### SSL with IP Whitelist
+
+Domains with `--whitelist` can still use Let's Encrypt HTTP-01 challenge. The domain script automatically adds an exception for `/.well-known/acme-challenge/` that allows Let's Encrypt's validation servers to reach your domain, even when other traffic is blocked.
+
+```bash
+# This works! SSL certificates with IP whitelist
+docker exec proxy-nginx /scripts/domain.sh upsert \
+  --domain=private.example.com \
+  --upstream=myapp-nginx \
+  --whitelist="100.64.0.0/10"
+
+docker exec -it proxy-nginx certbot --nginx -d private.example.com
+```
+
 ## Redirect Domains
 
 For www redirects or domain aliases:
