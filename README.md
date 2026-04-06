@@ -139,9 +139,7 @@ docker exec proxy-nginx nginx -s reload
 
 ## SSL Certificates
 
-### Single Domain (HTTP-01 Challenge)
-
-For public domains, use the standard HTTP-01 challenge:
+Request certificates with Certbot:
 
 ```bash
 # Single domain
@@ -151,35 +149,21 @@ docker exec -it proxy-nginx certbot --nginx -d www.example.com
 docker exec -it proxy-nginx certbot --nginx -d www.example.com -d example.com
 ```
 
-### Wildcard Certificates with TransIP (DNS-01 Challenge)
+Certificates auto-renew via cron (runs twice daily).
 
-For wildcard certificates (`*.example.com`) or domains behind Tailscale/firewalls, use the DNS-01 challenge with TransIP:
+### SSL with IP Whitelist
+
+Domains with `--whitelist` can still use Let's Encrypt HTTP-01 challenge. The domain script automatically adds an exception for `/.well-known/acme-challenge/` that allows Let's Encrypt's validation servers to reach your domain, even when other traffic is blocked.
 
 ```bash
-# 1. Configure TransIP credentials (one-time setup)
-docker exec proxy-nginx /scripts/transip-setup.sh setup \
-  --login=your-transip-username \
-  --key-file=/path/to/transip-private-key.pem
+# This works! SSL certificates with IP whitelist
+docker exec proxy-nginx /scripts/domain.sh upsert \
+  --domain=private.example.com \
+  --upstream=myapp-nginx \
+  --whitelist="100.64.0.0/10"
 
-# 2. Request wildcard certificate
-docker exec proxy-nginx /scripts/transip-setup.sh wildcard --domain=example.com
-
-# 3. Check status
-docker exec proxy-nginx /scripts/transip-setup.sh status
+docker exec -it proxy-nginx certbot --nginx -d private.example.com
 ```
-
-This will obtain a certificate covering both `example.com` and `*.example.com`.
-
-**Requirements:**
-- Domain must be registered/managed at TransIP
-- TransIP API access must be enabled in your account
-- Generate an API private key at https://www.transip.nl/cp/account/api/
-
-**Credentials format:**
-- Login: Your TransIP username
-- Private key: PEM format (starts with `-----BEGIN PRIVATE KEY-----`)
-
-Certificates auto-renew via cron (runs twice daily).
 
 ## Redirect Domains
 
