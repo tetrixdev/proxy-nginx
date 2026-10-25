@@ -15,6 +15,9 @@ RUN mkdir -p /etc/nginx/ssl && \
     -out /etc/nginx/ssl/selfsigned.crt \
     -subj "/C=XX/ST=State/L=City/O=PocketDev/OU=Proxy/CN=localhost"
 
+# The base nginx.conf with tokens masked in the access log (see the file's header)
+COPY nginx.conf /etc/nginx/nginx.conf
+
 # Copy maintenance page files
 COPY html /var/www/html
 

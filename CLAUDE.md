@@ -9,9 +9,11 @@ This is `tetrixdev/proxy-nginx`, a Docker-based nginx reverse proxy for producti
 | File | Purpose |
 |------|---------|
 | `Dockerfile` | Alpine-based nginx with certbot, cron |
+| `nginx.conf` | Base nginx config shipped in the image: the stock nginx:1.27-alpine file, with `token=`/`access_token=` masked in the access log |
 | `docker-entrypoint-custom` | Starts cron for cert renewal |
 | `compose/compose.yml` | Docker Compose template |
-| `compose/default.conf` | Nginx config template |
+| `compose/conf.d/default.conf` | Nginx config template (managed by `domain.sh`); seeded into `conf.d/default.conf` on a fresh install only, never overwritten |
+| `compose/conf.d/10-http2.conf` | `http2 on;` for every domain. Every `compose/conf.d/*.conf` except `default.conf` is stateless and laid down by `install.sh` on every run, so a file added here reaches every host on its next upgrade |
 | `html/maintenance.html` | Fallback page for 502/503 |
 | `install.sh` | One-line installer script |
 | `scripts/domain.sh` | Domain upsert/delete management |
@@ -45,6 +47,38 @@ proxy_set_header Connection $connection_upgrade;
 proxy_read_timeout 600s;
 proxy_send_timeout 600s;
 ```
+
+### HTTP/2
+
+`conf.d/10-http2.conf` sets `http2 on;` at http level (nginx 1.25.1+). Not on a `listen`
+line: that is the line certbot rewrites and `domain.sh` regenerates.
+
+## Config layout (1.4.0+)
+
+`compose.yml` mounts `./conf.d` as a **directory** at `/etc/nginx/conf.d`. Before 1.4.0 it
+mounted `./default.conf` as a single file, which binds the inode: any host-side
+replace-and-rename (`sed -i`, `mv`, most editors) orphaned the mount, and inside the
+container `sed -i` failed outright ("Resource busy"), so `domain.sh` could not update or
+delete an existing domain. `install.sh` migrates a pre-1.4 host into `conf.d/`, taking the
+config from the running container when it differs from the host file, and backs up both.
+
+Still prefer `domain.sh` over hand-editing the config: it validates with `nginx -t` and
+manages the `# BEGIN`/`# END` blocks.
+
+## certbot rewrites our config, and `domain.sh` has to cope
+
+`certbot --nginx` does not add a server block of its own. It **rewrites ours**: it swaps
+`listen 80;` for `listen 443 ssl;` inside the `# BEGIN`/`# END` block and appends the
+certificate paths. Two consequences `domain.sh` handles, and any change to it must keep
+handling:
+
+- **An upsert regenerates the block from scratch, so it carries certbot's SSL lines
+  across** (`extract_ssl_directives()`). Without that, a routine upsert (a max-body-size,
+  a whitelist) silently drops the domain off HTTPS.
+- **certbot reflows the file and can glue a marker to the preceding brace** (`}# END
+  app.example.com`). Lookups anchor markers to the start of a line, so `list` would hide
+  the domain, `delete` miss it, and `upsert` append a duplicate. `normalize_markers()`
+  repairs this before every command.
 
 ## Domain Management Scripts
 
@@ -93,10 +127,11 @@ docker exec proxy-nginx /scripts/domain.sh list
 | `--domain` | required | Domain name |
 | `--upstream` | - | Container to proxy to |
 | `--redirect` | - | Redirect target URL |
-| `--whitelist` | - | IP/CIDR allowlist (comma-separated) |
+| `--whitelist` | - | IP/CIDR allowlist (comma-separated); ACME challenges bypass it. Internal Docker networks (`172.16.0.0/12`, `192.168.0.0/16`) are always allowed so container-to-container traffic and headless testing never trip it |
 | `--basic-auth` | - | htpasswd format `user:hash` |
 | `--max-body-size` | `256M` | Upload size limit |
 | `--websocket-timeout` | `600s` | SSE/WebSocket timeout |
+| `--stream-uploads` | off | Stream request bodies to the upstream instead of saving them to the proxy's disk first (`proxy_request_buffering off`). For upstreams that handle streams; leave off for PHP-FPM, where buffering keeps a slow upload from holding a worker. Refused with `--redirect` |
 | `--comment` | - | Label in config |
 | `--no-reload` | - | Skip nginx reload |
 
@@ -130,7 +165,8 @@ server {
 # END app.example.com
 ```
 
-This allows upsert (update if exists, create if not) and clean deletion.
+This allows upsert (update if exists, create if not) and clean deletion. Every option is
+regenerated on each upsert, so repeat the ones to keep; certbot's SSL lines are kept.
 
 ## Common Tasks
 
@@ -159,12 +195,14 @@ docker exec proxy-nginx certbot renew
 docker exec proxy-nginx cat /etc/nginx/conf.d/default.conf
 ```
 
+On the host it is `~/docker-apps/proxy-nginx/conf.d/default.conf`.
+
 ## Networking
 
 All backend containers must be on `main-network` Docker network. The proxy uses Docker's internal DNS (`127.0.0.11`) to resolve container names.
 
 ## Versioning
 
-- Config template version tracked in `default.conf` header
+- Config template version tracked in `compose/conf.d/default.conf` header
 - Docker images tagged with semver (e.g., `1.0.0`)
 - Breaking changes = major version bump
