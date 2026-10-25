@@ -55,6 +55,9 @@ Upsert Options:
   --basic-auth=USER:HASH    Basic auth credentials (htpasswd format)
   --max-body-size=SIZE      Max upload size (default: 256M)
   --websocket-timeout=TIME  WebSocket/SSE timeout (default: 600s)
+  --stream-uploads          Pass request bodies to the upstream as they arrive,
+                            instead of saving them to the proxy's disk first
+                            (for upstreams that stream large uploads; not PHP-FPM)
   --no-reload               Don't reload nginx after changes
 
 Delete Options:
@@ -75,6 +78,10 @@ Examples:
   # Domain with basic auth
   domain.sh upsert --domain=admin.example.com --upstream=admin-nginx \
     --basic-auth='admin:$apr1$xyz...'
+
+  # Upstream that streams large uploads itself
+  domain.sh upsert --domain=files.example.com --upstream=files-app \
+    --max-body-size=6G --stream-uploads
 
   # Delete a domain
   domain.sh delete --domain=old.example.com
@@ -97,18 +104,85 @@ validate_domain() {
     fi
 }
 
+# Put every marker back at the start of its own line.
+#
+# certbot's nginx installer does not edit the file in place: it reparses it and
+# writes it back out from its own tree, and a comment that followed a `}` can
+# come back glued to it:
+#
+#     }# BEGIN app.example.com
+#
+# Every lookup below anchors the marker to the start of a line (`^# BEGIN`), so
+# one glued marker makes this script BLIND to a domain it manages:
+#   - `upsert` does not find the block, so it APPENDS a second one. nginx keeps
+#     serving the first ("conflicting server name"), so the upsert reports
+#     success and changes nothing.
+#   - `delete` cannot find the block and leaves it in place.
+#   - `list` stops showing the domain at all.
+#
+# So repair the file before looking at it. Idempotent, and it heals a config
+# that is already damaged. It matches only a hostname-shaped marker at the end
+# of a line, so prose that merely mentions "# BEGIN <domain>" is left alone.
+normalize_markers() {
+    [ -f "$CONFIG_FILE" ] || return 0
+    grep -qE '[^[:space:]]# (BEGIN|END) [A-Za-z0-9._*:-]+$' "$CONFIG_FILE" 2>/dev/null || return 0
+
+    _tmp=$(mktemp)
+    sed -E 's/([^[:space:]])(# (BEGIN|END) [A-Za-z0-9._*:-]+)$/\1\n\2/' "$CONFIG_FILE" > "$_tmp"
+    cat "$_tmp" > "$CONFIG_FILE"
+    rm -f "$_tmp"
+    log_warn "Repaired one or more # BEGIN/# END markers that were not at the start of a line."
+}
+
 # Check if domain block exists
 domain_exists() {
     domain="$1"
     grep -q "^# BEGIN $domain\$" "$CONFIG_FILE" 2>/dev/null
 }
 
-# Remove domain block from config
+# The SSL directives certbot injected INTO our block, so we can put them back.
+#
+# `certbot --nginx` does not add a block of its own for the served domain: it
+# rewrites OURS, swapping `listen 80;` for `listen 443 ssl;` and adding the
+# certificate paths. Because every upsert regenerates the block from scratch,
+# a later upsert (changing a max-body-size, a whitelist) would silently take the
+# domain OFF HTTPS: nginx -t passes and the reload succeeds, but certbot's
+# separate port-80 block still redirects to https and nothing listens on 443
+# for that name any more, so browsers land on the default server.
+#
+# Carry them across instead. If the domain has no cert yet this is empty and
+# the block gets `listen 80;` exactly as before.
+extract_ssl_directives() {
+    domain="$1"
+    [ -f "$CONFIG_FILE" ] || return 0
+
+    sed -n "/^# BEGIN $domain\$/,/^# END $domain\$/p" "$CONFIG_FILE" 2>/dev/null \
+        | grep -E '^[[:space:]]*(listen (\[::\]:)?443|ssl_certificate|ssl_certificate_key|include .*options-ssl-nginx|ssl_dhparam)' \
+        || true
+}
+
+# The listen/SSL tail of a generated block: whatever certbot had put there, or
+# plain port 80.
+generate_listen_directives() {
+    if [ -n "$SSL_DIRECTIVES" ]; then
+        printf '%s\n' "$SSL_DIRECTIVES"
+    else
+        printf '    listen 80;\n'
+    fi
+}
+
+# Remove domain block from config.
+# Write to a temp file and `cat` it back rather than `sed -i`: `cat >` truncates
+# the same inode in place, while `sed -i` renames a new file over the old one,
+# which fails ("Device or resource busy") on a pre-1.4 install where
+# default.conf is a single-file bind mount.
 remove_domain_block() {
     domain="$1"
     if domain_exists "$domain"; then
-        # Use sed to remove lines between BEGIN and END markers (inclusive)
-        sed -i "/^# BEGIN $domain\$/,/^# END $domain\$/d" "$CONFIG_FILE"
+        _tmp=$(mktemp)
+        sed "/^# BEGIN $domain\$/,/^# END $domain\$/d" "$CONFIG_FILE" > "$_tmp"
+        cat "$_tmp" > "$CONFIG_FILE"
+        rm -f "$_tmp"
         return 0
     fi
     return 1
@@ -135,6 +209,17 @@ NGINX
             cidr=$(echo "$cidr" | tr -d ' ')
             [ -n "$cidr" ] && echo "    allow $cidr;"
         done
+        echo ""
+        echo "    # Always trust internal Docker networks. Container-to-container"
+        echo "    # traffic (health checks, and a headless browser on the same host"
+        echo "    # reaching an app for testing) must never trip the whitelist. These"
+        echo "    # are Docker's default bridge address pools: 172.16.0.0/12 covers"
+        echo "    # docker0 plus every compose/user-defined network, and"
+        echo "    # 192.168.0.0/16 is the fallback pool used once the 172 space fills."
+        echo "    # Safe on this edge proxy: an external client can never present an"
+        echo "    # RFC1918 source address here."
+        echo "    allow 172.16.0.0/12;"
+        echo "    allow 192.168.0.0/16;"
         echo "    deny all;"
         echo ""
         echo "    # Allow ACME challenge for SSL certificates (bypasses IP whitelist)"
@@ -172,6 +257,20 @@ NGINX
         # Timeouts
         proxy_read_timeout $WEBSOCKET_TIMEOUT;
         proxy_send_timeout $WEBSOCKET_TIMEOUT;
+NGINX
+
+    # Request bodies streamed straight through (--stream-uploads). Off by default
+    # on purpose: buffering is what keeps a slow client from holding one of an
+    # upstream's few PHP workers for the whole length of its upload. An upstream
+    # that handles streams itself (and must not have uploads land on this
+    # proxy's disk) asks for it per domain.
+    if [ "$STREAM_UPLOADS" = "true" ]; then
+        echo ""
+        echo "        # Stream request bodies to the upstream as they arrive (--stream-uploads)"
+        echo "        proxy_request_buffering off;"
+    fi
+
+    cat << NGINX
 
         # Maintenance page fallback
         proxy_intercept_errors on;
@@ -187,7 +286,12 @@ NGINX
         alias /var/www/html/maintenance-assets/;
     }
 
-    listen 80;
+NGINX
+
+    # certbot's SSL directives if this domain already has a cert, else port 80.
+    generate_listen_directives
+
+    cat << NGINX
 }
 # END $DOMAIN
 NGINX
@@ -202,7 +306,11 @@ generate_redirect_block() {
 server {
     server_name $DOMAIN;
     return 308 $REDIRECT\$request_uri;
-    listen 80;
+NGINX
+
+    generate_listen_directives
+
+    cat << NGINX
 }
 # END $DOMAIN
 NGINX
@@ -276,6 +384,11 @@ cmd_upsert() {
         exit 1
     fi
 
+    if [ -n "$REDIRECT" ] && [ "$STREAM_UPLOADS" = "true" ]; then
+        log_error "--stream-uploads is not supported with --redirect: a redirect has no upstream"
+        exit 1
+    fi
+
     # Set defaults
     COMMENT="${COMMENT:-Managed by proxy-nginx}"
     MAX_BODY_SIZE="${MAX_BODY_SIZE:-256M}"
@@ -284,9 +397,20 @@ cmd_upsert() {
     # Setup basic auth if specified
     setup_basic_auth
 
+    # A marker certbot glued to the previous `}` would make us miss our own
+    # block and append a duplicate instead of updating it. Repair before we look.
+    normalize_markers
+
     # Remove existing block if present
+    SSL_DIRECTIVES=""
     if domain_exists "$DOMAIN"; then
         log_info "Updating existing configuration for $DOMAIN"
+        # Rescue certbot's SSL lines BEFORE the block goes: it is regenerated
+        # from scratch, and without this the domain silently drops off HTTPS.
+        SSL_DIRECTIVES=$(extract_ssl_directives "$DOMAIN")
+        if [ -n "$SSL_DIRECTIVES" ]; then
+            log_info "Preserving existing SSL configuration (certificate stays in place)"
+        fi
         remove_domain_block "$DOMAIN"
     else
         log_info "Creating new configuration for $DOMAIN"
@@ -307,6 +431,10 @@ cmd_upsert() {
         if [ -n "$BASIC_AUTH" ]; then
             log_info "Basic auth: enabled"
         fi
+
+        if [ "$STREAM_UPLOADS" = "true" ]; then
+            log_info "Stream uploads: enabled (proxy_request_buffering off)"
+        fi
     fi
 
     reload_nginx
@@ -324,6 +452,9 @@ cmd_delete() {
     DOMAIN=$(normalize_domain "$DOMAIN")
 
     validate_domain "$DOMAIN"
+
+    # A glued marker would make us report "not found" for a domain that is there.
+    normalize_markers
 
     if ! domain_exists "$DOMAIN"; then
         log_warn "Domain $DOMAIN not found in configuration"
@@ -344,6 +475,10 @@ cmd_delete() {
 
 # Command: list
 cmd_list() {
+    # Without this, a domain whose marker certbot glued to the previous `}` is
+    # simply missing from the listing.
+    normalize_markers
+
     log_info "Managed domains in $CONFIG_FILE:"
     echo ""
 
@@ -365,6 +500,7 @@ WHITELIST=""
 BASIC_AUTH=""
 MAX_BODY_SIZE=""
 WEBSOCKET_TIMEOUT=""
+STREAM_UPLOADS=""
 NO_RELOAD="false"
 
 # First argument is the command
@@ -401,6 +537,9 @@ while [ $# -gt 0 ]; do
             ;;
         --websocket-timeout=*)
             WEBSOCKET_TIMEOUT="${1#*=}"
+            ;;
+        --stream-uploads)
+            STREAM_UPLOADS="true"
             ;;
         --no-reload)
             NO_RELOAD="true"

@@ -9,6 +9,8 @@ Part of the [PocketDev](https://github.com/tetrixdev/pocket-dev) ecosystem.
 - **SSL/TLS Termination** - Let's Encrypt via Certbot with auto-renewal
 - **SSE Streaming Optimization** - `ssl_buffer_size 1400` for smooth Server-Sent Events
 - **WebSocket Support** - Dynamic connection upgrade headers
+- **HTTP/2** - On for every domain, so streaming apps don't exhaust the browser's per-origin connections
+- **Tokens masked in logs** - `token=` / `access_token=` query values are logged as `[REDACTED]`
 - **Maintenance Pages** - Automatic fallback on 502/503 errors
 - **Security** - Blocks direct IP access, hides nginx version
 - **One-Line Install** - Get up and running in seconds
@@ -24,19 +26,32 @@ curl -fsSL https://raw.githubusercontent.com/tetrixdev/proxy-nginx/main/install.
 With a specific version:
 
 ```bash
-VERSION=1.0.0 curl -fsSL https://raw.githubusercontent.com/tetrixdev/proxy-nginx/main/install.sh | bash
+VERSION=1.4.0 curl -fsSL https://raw.githubusercontent.com/tetrixdev/proxy-nginx/main/install.sh | bash
 ```
+
+Running the installer on a host that already has proxy-nginx is an **upgrade in place**:
+`conf.d/default.conf` (which holds every domain block) is never overwritten, a pre-1.4
+single-file `default.conf` is migrated into `conf.d/`, and the stateless fragments
+(`conf.d/10-http2.conf`) are laid down on every run. It prompts only on a terminal;
+use `FORCE=1` for automation.
 
 ### Manual Setup
 
 ```bash
 # Get version to deploy
-VERSION="1.0.0"
+VERSION="1.4.0"
 
 # Clone and copy files
-git clone --depth 1 --branch "$VERSION" https://github.com/tetrixdev/proxy-nginx.git /tmp/proxy-nginx
-mkdir -p ~/docker-apps/proxy-nginx && cd ~/docker-apps/proxy-nginx
-cp /tmp/proxy-nginx/compose/compose.yml /tmp/proxy-nginx/compose/default.conf .
+git clone --depth 1 --branch "v$VERSION" https://github.com/tetrixdev/proxy-nginx.git /tmp/proxy-nginx
+mkdir -p ~/docker-apps/proxy-nginx/conf.d && cd ~/docker-apps/proxy-nginx
+cp /tmp/proxy-nginx/compose/compose.yml .
+# FRESH INSTALL ONLY. conf.d/default.conf holds every domain domain.sh has added, so
+# copying the template over an existing one wipes them all. On an existing host use
+# install.sh, which upgrades in place and preserves the live config.
+[ -f conf.d/default.conf ] || cp /tmp/proxy-nginx/compose/conf.d/default.conf conf.d/
+# Stateless fragments (HTTP/2, and anything added later). Always safe to copy: they
+# hold no domains, so unlike default.conf the release's copy is always the right one.
+cp /tmp/proxy-nginx/compose/conf.d/[0-9]*.conf conf.d/
 rm -rf /tmp/proxy-nginx
 
 # Update version in compose.yml
@@ -88,7 +103,18 @@ docker exec proxy-nginx /scripts/domain.sh upsert \
   --upstream=upload-nginx \
   --max-body-size=1G \
   --websocket-timeout=3600s
+
+# Upstream that streams large uploads itself (request bodies not saved to the proxy's disk)
+docker exec proxy-nginx /scripts/domain.sh upsert \
+  --domain=files.example.com \
+  --upstream=files-app \
+  --max-body-size=6G \
+  --stream-uploads
 ```
+
+Every option is regenerated on each upsert, so repeat the ones you want to keep.
+An upsert of a domain that already has a certificate keeps certbot's `listen 443 ssl`
+and `ssl_*` lines, so changing an option never takes a domain off HTTPS.
 
 ### Remove a Domain
 
@@ -113,12 +139,13 @@ docker exec proxy-nginx /scripts/domain.sh list
 | `--basic-auth` | Basic auth `user:hash` | - |
 | `--max-body-size` | Max upload size | `256M` |
 | `--websocket-timeout` | WebSocket/SSE timeout | `600s` |
+| `--stream-uploads` | Stream request bodies to the upstream instead of buffering them on the proxy's disk (`proxy_request_buffering off`); not for PHP-FPM upstreams | off |
 | `--comment` | Label for config block | - |
 | `--no-reload` | Skip nginx reload | - |
 
 ### Manual Configuration
 
-For complex configurations, edit `default.conf` directly. Use `# BEGIN domain` and `# END domain` markers if you want the script to manage the block later:
+For complex configurations, edit `conf.d/default.conf` directly (prefer `domain.sh`: it validates with `nginx -t` before reloading). Use `# BEGIN domain` and `# END domain` markers if you want the script to manage the block later:
 
 ```nginx
 # BEGIN www.example.com
@@ -165,6 +192,12 @@ docker exec proxy-nginx /scripts/domain.sh upsert \
 docker exec -it proxy-nginx certbot --nginx -d private.example.com
 ```
 
+Whitelisted domains always also allow Docker's internal ranges (`172.16.0.0/12`,
+`192.168.0.0/16`), so container-to-container traffic (health checks, a headless
+browser on the same host) never trips the whitelist. An external client can never
+present those source addresses at this edge proxy. Existing whitelisted domains pick
+this up on their next upsert.
+
 ## Redirect Domains
 
 For www redirects or domain aliases:
@@ -178,6 +211,29 @@ server {
 ```
 
 ## Configuration Reference
+
+### HTTP/2
+
+On by default, for every domain, via `conf.d/10-http2.conf` (`http2 on;` at http level,
+nginx 1.25.1+).
+
+It matters most for anything that **streams**. A browser allows only six connections
+per origin over HTTP/1.1, and a Server-Sent Events connection holds one of them open
+for as long as the page wants it, so an app with a few live streams spends its whole
+budget and every later request waits in the browser's own queue until a stream ends.
+HTTP/2 carries many streams over one connection, so the cap stops applying.
+
+The setting is deliberately **not** on a `listen` line: `domain.sh` regenerates a server
+block from its own template plus whatever `listen 443` / `ssl_*` lines certbot left, so
+`listen 443 ssl http2` would be erased the next time that domain was touched.
+
+### Access log: tokens masked
+
+The image ships its own `/etc/nginx/nginx.conf` (the nginx:1.27-alpine stock file with
+one change): `token=` and `access_token=` query values in the logged request line are
+replaced by `[REDACTED]`, so a client that puts a credential in a URL (for example a
+WebSocket upgrade) does not leave it in the logs. The error log can still print the raw
+request line on upstream errors.
 
 ### SSE Streaming
 
@@ -214,14 +270,14 @@ volumes:
 ```yaml
 services:
   proxy-nginx:
-    image: ghcr.io/tetrixdev/proxy-nginx:1.0.0
+    image: ghcr.io/tetrixdev/proxy-nginx:1.4.0
     container_name: proxy-nginx
     ports:
       - "80:80"
       - "443:443"
     volumes:
       - ./letsencrypt:/etc/letsencrypt
-      - ./default.conf:/etc/nginx/conf.d/default.conf
+      - ./conf.d:/etc/nginx/conf.d   # a directory, not a single file
     networks:
       - main-network
     restart: always

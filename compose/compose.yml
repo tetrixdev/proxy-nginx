@@ -7,7 +7,14 @@ services:
       - "443:443"
     volumes:
       - ./letsencrypt:/etc/letsencrypt
-      - ./default.conf:/etc/nginx/conf.d/default.conf
+      # Mount the DIRECTORY, not the file. A single-file bind mount binds the inode, so
+      # any host-side tool that rewrites the file by replace-and-rename (sed -i, mv, and
+      # most editors) leaves the container attached to the old, orphaned inode. Host and
+      # container then silently diverge: domain.sh writes inside the container land on the
+      # orphan, work fine, and vanish on the next container start. A directory mount
+      # resolves the path on every open, so it survives any rewrite. It also holds the
+      # stateless fragments install.sh lays down (10-http2.conf).
+      - ./conf.d:/etc/nginx/conf.d
     networks:
       - main-network
     restart: always
